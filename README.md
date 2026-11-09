@@ -19,7 +19,7 @@ Select text in any app and press **⌥ Esc**. Press it again to stop.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/kokoro-speak.git
+git clone https://github.com/EdoiseO/kokoro-speak.git
 cd kokoro-speak
 ./install.sh
 ```
