@@ -37,7 +37,7 @@ You can run it again at any time. Steps that are already done are skipped.
 
 The first time you press ⌥ Esc, macOS asks you to allow Kokoro Speak in **System Settings > Privacy & Security > Accessibility**. This lets it read the text you've selected in other apps. Turn it on, then press ⌥ Esc again.
 
-The app is signed locally (ad hoc), so after you reinstall or update it, macOS may ask again. If ⌥ Esc stops reading your selection, turn Kokoro Speak off and on again in that list.
+The installer creates a self-signed certificate called "Kokoro Speak Local Signing" in your login keychain and signs the app with it (`scripts/make-signing-cert.sh`). Because every build is signed with the same certificate, macOS keeps the permission when you update. The certificate never leaves your Mac. To remove it, run `security delete-identity -c "Kokoro Speak Local Signing"`.
 
 If the built-in Speak Selection also uses ⌥ Esc (System Settings > Accessibility > Spoken Content), change one of them.
 

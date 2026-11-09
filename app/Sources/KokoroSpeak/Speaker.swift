@@ -74,9 +74,14 @@ final class Speaker {
     private var queue: [Chunk] = []
     private var nextChunkID = 0
     private var lastChunkRange = NSRange(location: 0, length: 0)
-    /// Speech played in finished chunks, used to estimate time left.
-    private var finishedSeconds = 0.0
+    /// Characters skipped or finished, for progress.
     private var finishedCharacters = 0
+    /// All audio generated so far, which gives the speaking rate for this voice and speed.
+    private var generatedSeconds = 0.0
+    private var generatedCharacters = 0
+    /// The time-left value last shown, so it counts down steadily instead of jumping.
+    private var shownSecondsLeft: Double?
+    private var shownAt = Date()
     private var speed = 1.0
 
     init() {
@@ -156,23 +161,43 @@ final class Speaker {
             chunkRange = NSRange(location: 0, length: min(text.length, 200))
         }
         var wordRange: NSRange?
-        var spokenInChunk = 0.0
         if let chunk {
             let offset = time - chunk.start
-            spokenInChunk = min(max(offset, 0), chunk.duration)
             wordRange = (chunk.words.last { $0.start <= offset } ?? chunk.words.first)?.range
         }
         let position = wordRange.map { NSMaxRange($0) } ?? chunkRange.location
         let total = max(text.length, 1)
         let fraction = min(Double(position) / Double(total), 1)
 
-        let seconds = finishedSeconds + spokenInChunk
-        let characters = Double(finishedCharacters) + (wordRange.map { Double(NSMaxRange($0) - chunkRange.location) } ?? 0)
-        let rate = seconds > 3 && characters > 0 ? characters / seconds : 14 * speed
-        let secondsLeft = state == .speaking ? Double(text.length - position) / rate : nil
+        let secondsLeft = state == .speaking ? smoothedSecondsLeft(at: time, waiting: waiting) : nil
         return Snapshot(text: text, chunkRange: chunkRange, wordRange: wordRange,
                         fraction: fraction, secondsLeft: secondsLeft, isPaused: audio.isPaused,
                         isWaiting: waiting && !audio.isPaused)
+    }
+
+    /// Audio already queued is known exactly; text not yet generated is estimated from
+    /// the rate measured so far. The shown value counts down in real time and eases
+    /// toward that estimate, so it doesn't jump with every word.
+    private func smoothedSecondsLeft(at time: Double, waiting: Bool) -> Double {
+        let queued = queue.reduce(0.0) { total, chunk in
+            total + max(0, chunk.start + chunk.duration - max(time, chunk.start))
+        }
+        let notGenerated = Double(max(text.length - NSMaxRange(lastChunkRange), 0))
+        let rate = generatedSeconds > 0 && generatedCharacters > 0
+            ? Double(generatedCharacters) / generatedSeconds : 14 * speed
+        let estimate = queued + notGenerated / rate
+
+        let now = Date()
+        defer { shownAt = now }
+        guard var shown = shownSecondsLeft else {
+            shownSecondsLeft = estimate
+            return estimate
+        }
+        if !audio.isPaused && !waiting { shown -= now.timeIntervalSince(shownAt) }
+        let gap = estimate - shown
+        if abs(gap) > 1.5 { shown += gap * 0.08 }
+        shownSecondsLeft = max(shown, 0)
+        return max(shown, 0)
     }
 
     // MARK: - Worker lifecycle
@@ -260,6 +285,8 @@ final class Speaker {
             guard let start = audio.schedule(buffer, id: chunk.id) else { return fail("Couldn't play audio") }
             chunk.start = start
             queue.append(chunk)
+            generatedSeconds += chunk.duration
+            generatedCharacters += textRange.length
             lastChunkRange = textRange
             state = .speaking
         }
@@ -280,7 +307,6 @@ final class Speaker {
     private func chunkFinished(_ id: Int) {
         guard currentRequest != nil, let index = queue.firstIndex(where: { $0.id == id }) else { return }
         let chunk = queue.remove(at: index)
-        finishedSeconds += chunk.duration
         finishedCharacters += chunk.textRange.length
         if generationDone && queue.isEmpty { finish() } else { requestNextIfNeeded() }
     }
@@ -288,8 +314,10 @@ final class Speaker {
     private func clearPlayback() {
         audio.shutdown()
         queue.removeAll()
-        finishedSeconds = 0
         finishedCharacters = 0
+        generatedSeconds = 0
+        generatedCharacters = 0
+        shownSecondsLeft = nil
         lastChunkRange = NSRange(location: 0, length: 0)
     }
 

@@ -79,6 +79,9 @@ step "Testing speech generation"
 "$RUNTIME/.venv/bin/python" -I "$ROOT/scripts/selftest.py" "$RUNTIME"
 
 # 5. Build and install the app -------------------------------------------------
+step "Setting up local code signing"
+"$ROOT/scripts/make-signing-cert.sh"
+
 step "Building the app"
 "$ROOT/scripts/build-app.sh" >/dev/null
 osascript -e 'tell application id "'"$BUNDLE_ID"'" to quit' >/dev/null 2>&1 || true

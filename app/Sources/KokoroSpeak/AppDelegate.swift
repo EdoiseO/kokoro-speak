@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Drives the wave animation and word highlighting. Runs only while speaking.
     private var frameTimer: Timer?
     private var phase: CGFloat = 0
+    private var tickCount = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
@@ -106,6 +107,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let loading = speaker.state == .loading
         if !speaker.isPaused { phase += 0.45 }
         let snapshot = speaker.snapshot()
+        tickCount += 1
+        if tickCount % 15 == 0, let left = snapshot?.secondsLeft {
+            log.debug("time left \(left, format: .fixed(precision: 1), privacy: .public)s")
+        }
         if speaker.isBusy {
             statusItem.button?.image = SpokenText.activityImage(size: 18, phase: phase, snapshot: snapshot,
                                                                 color: .controlAccentColor)
