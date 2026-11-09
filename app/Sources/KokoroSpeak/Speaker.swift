@@ -20,6 +20,8 @@ final class Speaker {
         let fraction: Double
         let secondsLeft: Double?
         let isPaused: Bool
+        /// True while the model loads, or when playback has caught up with generation.
+        let isWaiting: Bool
     }
 
     private struct Word {
@@ -134,7 +136,12 @@ final class Speaker {
         guard isBusy else { return nil }
         let time = audio.currentTime
         let chunk = queue.first { time < $0.start + $0.duration } ?? queue.last
-        let chunkRange = chunk?.textRange ?? lastChunkRange
+        let waiting = state == .loading || queue.last.map { time >= $0.start + $0.duration - 0.05 } ?? true
+        var chunkRange = chunk?.textRange ?? lastChunkRange
+        if chunk == nil && chunkRange.length == 0 {
+            // Nothing played yet: preview the start of the selection while the model loads.
+            chunkRange = NSRange(location: 0, length: min(text.length, 200))
+        }
         var wordRange: NSRange?
         var spokenInChunk = 0.0
         if let chunk {
@@ -151,7 +158,8 @@ final class Speaker {
         let rate = seconds > 3 && characters > 0 ? characters / seconds : 14 * speed
         let secondsLeft = state == .speaking ? Double(text.length - position) / rate : nil
         return Snapshot(text: text, chunkRange: chunkRange, wordRange: wordRange,
-                        fraction: fraction, secondsLeft: secondsLeft, isPaused: audio.isPaused)
+                        fraction: fraction, secondsLeft: secondsLeft, isPaused: audio.isPaused,
+                        isWaiting: waiting && !audio.isPaused)
     }
 
     // MARK: - Worker lifecycle

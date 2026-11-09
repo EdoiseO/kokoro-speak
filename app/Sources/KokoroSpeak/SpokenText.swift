@@ -41,7 +41,8 @@ enum SpokenText {
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\t", with: " ")
         let result = NSMutableAttributedString(string: visible, attributes: [
-            .font: font, .foregroundColor: NSColor.labelColor,
+            .font: font,
+            .foregroundColor: snapshot.wordRange == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
         ])
         if let word = snapshot.wordRange {
             let local = NSRange(location: word.location - window.location, length: word.length)
@@ -62,6 +63,33 @@ enum SpokenText {
         guard let seconds, seconds.isFinite else { return "" }
         let total = max(Int(seconds.rounded()), 0)
         return String(format: "%d:%02d left", total / 60, total % 60)
+    }
+
+    /// A spinning arc, used while the model loads or the next sentence is being generated.
+    static func spinnerImage(size: CGFloat, angle: CGFloat, color: NSColor) -> NSImage {
+        NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+            let radius = rect.width * 0.32
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
+            track.lineWidth = 1.8
+            color.withAlphaComponent(0.25).setStroke()
+            track.stroke()
+            let start = -angle * 180 / .pi
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: center, radius: radius, startAngle: start, endAngle: start + 100)
+            arc.lineWidth = 1.8
+            arc.lineCapStyle = .round
+            color.setStroke()
+            arc.stroke()
+            return true
+        }
+    }
+
+    /// The wave while speaking, a spinner while waiting, a flat wave while paused.
+    static func activityImage(size: CGFloat, phase: CGFloat, snapshot: Speaker.Snapshot?, color: NSColor) -> NSImage {
+        if snapshot?.isWaiting ?? true { return spinnerImage(size: size, angle: phase, color: color) }
+        return waveImage(size: size, phase: phase, amplitude: snapshot?.isPaused == true ? 0.25 : 1, color: color)
     }
 
     /// A small sine wave. `phase` animates it; `amplitude` 0...1.

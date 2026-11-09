@@ -52,11 +52,12 @@ final class NowSpeakingView: NSView {
 
     func update(_ snapshot: Speaker.Snapshot?, voice: String, phase: CGFloat, loading: Bool) {
         let paused = snapshot?.isPaused ?? false
-        wave.image = SpokenText.waveImage(size: 14, phase: phase, amplitude: paused || loading ? 0.25 : 1,
-                                          color: .controlAccentColor)
+        wave.image = SpokenText.activityImage(size: 14, phase: phase, snapshot: snapshot, color: .controlAccentColor)
         let name = Voices.displayName(voice)
         if loading {
             status.stringValue = "Loading \(name)…"
+        } else if snapshot?.isWaiting == true {
+            status.stringValue = "Preparing the next sentence…"
         } else if paused {
             status.stringValue = "Paused · \(name)"
         } else {

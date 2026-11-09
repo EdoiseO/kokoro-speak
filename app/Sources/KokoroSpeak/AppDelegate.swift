@@ -81,9 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !speaker.isPaused { phase += 0.45 }
         let snapshot = speaker.snapshot()
         if speaker.isBusy {
-            statusItem.button?.image = SpokenText.waveImage(
-                size: 18, phase: phase, amplitude: speaker.isPaused || loading ? 0.3 : 1,
-                color: .controlAccentColor)
+            statusItem.button?.image = SpokenText.activityImage(size: 18, phase: phase, snapshot: snapshot,
+                                                                color: .controlAccentColor)
         }
         if miniPlayer.isVisible {
             miniPlayer.update(snapshot, voice: Settings.voice, phase: phase, loading: loading)

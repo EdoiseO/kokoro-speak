@@ -112,11 +112,12 @@ final class MiniPlayer {
 
     func update(_ snapshot: Speaker.Snapshot?, voice: String, phase: CGFloat, loading: Bool) {
         let paused = snapshot?.isPaused ?? false
-        wave.image = SpokenText.waveImage(size: 18, phase: phase, amplitude: paused || loading ? 0.25 : 1,
-                                          color: .controlAccentColor)
+        wave.image = SpokenText.activityImage(size: 18, phase: phase, snapshot: snapshot, color: .controlAccentColor)
         let name = Voices.displayName(voice)
         if loading {
-            status.stringValue = "\(name) · loading…"
+            status.stringValue = "Loading \(name)…"
+        } else if snapshot?.isWaiting == true {
+            status.stringValue = "\(name) · preparing the next sentence…"
         } else if paused {
             status.stringValue = "\(name) · paused"
         } else {
