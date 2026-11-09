@@ -49,6 +49,21 @@ enum Settings {
         set { UserDefaults.standard.set(newValue, forKey: "voice") }
     }
 
+    enum Highlight: String, CaseIterable {
+        case yellow, blue
+        var title: String { self == .yellow ? "Yellow" : "Light blue" }
+    }
+
+    static var highlight: Highlight {
+        get { Highlight(rawValue: UserDefaults.standard.string(forKey: "highlight") ?? "") ?? .yellow }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "highlight") }
+    }
+
+    static var showMiniPlayer: Bool {
+        get { UserDefaults.standard.object(forKey: "showMiniPlayer") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "showMiniPlayer") }
+    }
+
     static var speed: Double {
         get {
             let stored = UserDefaults.standard.double(forKey: "speed")

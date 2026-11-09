@@ -1,6 +1,16 @@
 """Local, network-denied Kokoro RPC worker. Model and voices are always local.
 
-Protocol: one JSON object per line on stdin/stdout. See README for details.
+Protocol: one JSON object per line on stdin and stdout.
+
+  -> {"rpcId": 1, "action": "start", "requestId": "r1", "text": "...", "voice": "af_aoede", "speed": 1.0}
+  <- {"rpcId": 1, "result": {"done": false, "audioBase64": "<WAV>", "mimeType": "audio/wav",
+                             "textStart": 0, "textEnd": 42, "words": [[0, 5, 0.0, 0.31], ...]}}
+  -> {"rpcId": 2, "action": "next", "requestId": "r1"}
+  <- ... until {"done": true}
+  -> {"rpcId": 9, "action": "cancel", "requestId": "r1"}
+
+Text offsets are UTF-16 code units (like NSString), and word times are seconds
+from the start of that chunk's audio. A chunk is a sentence or a few short ones.
 """
 
 import base64
@@ -21,47 +31,15 @@ sys.stdout = open(os.devnull, "w")  # Library diagnostics must never enter the R
 logging.disable(logging.CRITICAL)
 OUTPUT_LOCK = threading.Lock()
 MAX_TEXT = 200000
-MAX_SENTENCE_RANGES = 4096
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
-JS_NON_WHITESPACE = re.compile(r"[^\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]")
-
-
-def validate_sentence_ranges(text, ranges):
-    """Convert exact JS UTF-16 boundaries to Python indices without losing text."""
-    if not isinstance(ranges, list) or not 1 <= len(ranges) <= MAX_SENTENCE_RANGES:
-        raise ValueError("Invalid sentence ranges")
-    boundaries = {0: 0}
-    offset = 0
-    for index, character in enumerate(text):
-        code = ord(character)
-        if 0xD800 <= code <= 0xDFFF:
-            raise ValueError("Invalid Unicode text")
-        offset += 2 if code > 0xFFFF else 1
-        if offset > MAX_TEXT:
-            raise ValueError("Text is too long")
-        boundaries[offset] = index + 1
-    converted = []
-    previous_end = 0
-    previous_python_end = 0
-    for item in ranges:
-        if not isinstance(item, dict):
-            raise ValueError("Invalid sentence range")
-        start, end = item.get("start"), item.get("end")
-        if (not isinstance(start, int) or isinstance(start, bool) or
-                not isinstance(end, int) or isinstance(end, bool) or
-                start < previous_end or start < 0 or start >= end or
-                start not in boundaries or end not in boundaries):
-            raise ValueError("Invalid sentence boundary")
-        python_start, python_end = boundaries[start], boundaries[end]
-        if JS_NON_WHITESPACE.search(text[previous_python_end:python_start]) or not JS_NON_WHITESPACE.search(text[python_start:python_end]):
-            raise ValueError("Sentence ranges do not cover text")
-        converted.append((start, end, python_start, python_end))
-        previous_end, previous_python_end = end, python_end
-    if JS_NON_WHITESPACE.search(text[previous_python_end:]):
-        raise ValueError("Sentence ranges do not cover text")
-    return converted
+SAMPLE_RATE = 24000
+MAX_PHONEMES = 480          # the model's context is 510 tokens
+FIRST_CHUNK_CHARS = 140     # short first chunk so speech starts quickly
+CHUNK_CHARS = 300
+WORD = re.compile(r"\S+")
+SENTENCE_END = re.compile(r"[.!?;:…][\"'”’)\]]*$")
 
 
 def reply(value):
@@ -74,25 +52,37 @@ def error(rpc_id, code="SPEECH_FAILED"):
     reply({"rpcId": rpc_id, "error": {"code": code, "message": code}})
 
 
-def phoneme_chunks(phonemes, first_limit=180, next_limit=350):
-    """Keep every non-whitespace phoneme, prefer sentence/word boundaries."""
-    original = " ".join(phonemes.split())
-    remaining = original
-    chunks = []
-    while remaining:
-        limit = first_limit if not chunks else next_limit
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        head = remaining[:limit]
-        punctuation = max(head.rfind(mark) for mark in (". ", "! ", "? ", "; ", ": "))
-        space = head.rfind(" ")
-        cut = punctuation + 1 if punctuation >= 60 else space if space >= 40 else limit
-        chunks.append(remaining[:cut].strip())
-        remaining = remaining[cut:].lstrip()
-    if "".join(chunks).replace(" ", "") != original.replace(" ", ""):
-        raise RuntimeError("Phoneme content changed during splitting")
-    return [chunk for chunk in chunks if chunk]
+def utf16_offsets(text):
+    """offsets[i] is the UTF-16 offset of Python index i."""
+    offsets = [0] * (len(text) + 1)
+    total = 0
+    for index, character in enumerate(text):
+        total += 2 if ord(character) > 0xFFFF else 1
+        offsets[index + 1] = total
+    return offsets
+
+
+def word_groups(words, text):
+    """Split word spans into chunks, preferring to end at a sentence boundary."""
+    index = 0
+    limit = FIRST_CHUNK_CHARS
+    while index < len(words):
+        start = words[index][0]
+        end = index
+        best = None
+        while end < len(words) and (end == index or words[end][1] - start <= limit):
+            if SENTENCE_END.search(text[words[end][0]:words[end][1]]) and words[end][1] - start >= limit * 0.25:
+                best = end
+            end += 1
+        last = best if best is not None and end < len(words) else end - 1
+        yield index, last + 1
+        index = last + 1
+        limit = CHUNK_CHARS
+
+
+def phoneme_word_spans(phonemes):
+    """Character spans of the space-separated words in a phoneme string."""
+    return [(match.start(), match.end()) for match in re.finditer(r"[^ ]+", phonemes)]
 
 
 class Engine:
@@ -111,7 +101,7 @@ class Engine:
         self.styles = {}
 
     def metadata(self, selected):
-        return {"voices": [{"id": v, "name": v.split("_", 1)[1].replace("_", " ").title(), "lang": "en-GB" if v[0] == "b" else "en-US"} for v in self.voices], "selectedVoice": selected, "speed": 1, "engine": self.kind}
+        return {"voices": [{"id": v, "name": v.split("_", 1)[1].replace("_", " ").title(), "lang": "en-GB" if v[0] == "b" else "en-US"} for v in self.voices], "selectedVoice": selected, "engine": self.kind}
 
     def load(self):
         if self.model is not None:
@@ -149,14 +139,26 @@ class Engine:
             del weights
             mx.clear_cache()
 
-    def prepare(self, text, voice):
+    def chunks(self, text, voice):
+        """Lazily yields (word spans, phonemes) per chunk, phonemizing one chunk at a time."""
         self.load()
         language = "en-gb" if voice[0] == "b" else "en-us"
-        phonemes = self.tokenizer.phonemize(text, language)
-        return iter(phoneme_chunks(phonemes))
+        words = [(m.start(), m.end()) for m in WORD.finditer(text)]
+        pending = deque(word_groups(words, text))
+        while pending:
+            first, last = pending.popleft()
+            spans = words[first:last]
+            phonemes = self.tokenizer.phonemize(text[spans[0][0]:spans[-1][1]], language)
+            if len(phonemes) > MAX_PHONEMES and last - first > 1:
+                middle = (first + last) // 2
+                pending.extendleft([(middle, last), (first, middle)])
+                continue
+            yield spans, phonemes[:MAX_PHONEMES]
 
     def render(self, phonemes, voice, speed=1.0):
+        """Returns (float audio, [(start_s, end_s)] per phoneme word or None)."""
         np = self.np
+        timings = None
         if self.kind == "onnx":
             audio, rate = self.model.create(phonemes, voice=voice, is_phonemes=True, speed=speed)
         else:
@@ -169,26 +171,75 @@ class Engine:
                 self.styles[voice] = mx.array(self.bank[voice], dtype=dtype)
                 mx.eval(self.styles[voice])
             ref = self.styles[voice][min(len(known), len(self.bank[voice])) - 1]
-            generated = self.model(known, ref, speed=speed)
-            mx.eval(generated)
-            audio = np.array(generated.reshape(-1).astype(mx.float32))
-            del generated, ref
+            output = self.model(known, ref, speed=speed, return_output=True)
+            audio = np.array(output.audio.reshape(-1).astype(mx.float32))
+            durations = np.array(output.pred_dur).astype(np.int64)
+            del output, ref
             mx.clear_cache()
+            rate = SAMPLE_RATE
+            # pred_dur has one entry per token plus a boundary token at each end.
+            if len(durations) == len(known) + 2 and durations.sum() > 0:
+                per_frame = len(audio) / durations.sum()
+                edges = np.concatenate([[0], np.cumsum(durations)]) * per_frame
+                timings = [(edges[a + 1], edges[b + 1]) for a, b in phoneme_word_spans(known)]
             from kokoro_onnx.trim import trim
-            audio, _ = trim(audio)
-            rate = 24000
+            audio, kept = trim(audio)
+            if timings is not None:
+                offset = int(kept[0])
+                timings = [(max(0.0, (a - offset) / rate), max(0.0, (b - offset) / rate)) for a, b in timings]
         if len(audio) == 0 or not np.isfinite(audio).all() or not np.any(audio):
             raise RuntimeError("Invalid generated speech")
         if len(audio) > rate * 90:
             raise RuntimeError("Unexpectedly long chunk")
+        return audio, rate, timings
+
+    @staticmethod
+    def wav(np, audio, rate):
         pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2")
         output = io.BytesIO()
-        with wave.open(output, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(rate)
-            wav.writeframes(pcm.tobytes())
-        return {"done": False, "audioBase64": base64.b64encode(output.getvalue()).decode("ascii"), "mimeType": "audio/wav"}
+        with wave.open(output, "wb") as file:
+            file.setnchannels(1)
+            file.setsampwidth(2)
+            file.setframerate(rate)
+            file.writeframes(pcm.tobytes())
+        return output.getvalue()
+
+
+def align_words(text, spans, timings, duration, count_spoken=None):
+    """Gives every text word a (start, end) time.
+
+    Uses the model's per-word timings when the word counts match. When they don't
+    (numbers and abbreviations become several spoken words), count_spoken(word)
+    says how many spoken words each text word became. Otherwise the speech is
+    spread across the words by length.
+    """
+    def clamp(a, b):
+        return min(a, duration), min(max(b, a), duration)
+
+    if timings and len(timings) == len(spans):
+        return [clamp(a, b) for a, b in timings]
+    if timings and count_spoken is not None:
+        counts = [count_spoken(text[s:e]) for s, e in spans]
+        if sum(counts) == len(timings):
+            result, index = [], 0
+            for count in counts:
+                if count == 0:
+                    edge = timings[index][0] if index < len(timings) else timings[-1][1]
+                    result.append(clamp(edge, edge))
+                else:
+                    result.append(clamp(timings[index][0], timings[index + count - 1][1]))
+                    index += count
+            return result
+    start, end = (timings[0][0], timings[-1][1]) if timings else (0.0, duration)
+    end = min(max(end, start + 0.01), duration)
+    weights = [e - s + 1 for s, e in spans]
+    total = sum(weights)
+    result, cursor = [], start
+    for weight in weights:
+        length = (end - start) * weight / total
+        result.append((cursor, cursor + length))
+        cursor += length
+    return result
 
 
 class Service:
@@ -221,9 +272,6 @@ class Service:
         action = command.get("action")
         if not isinstance(rpc_id, int) or isinstance(rpc_id, bool) or rpc_id < 1:
             return
-        if "sentenceRanges" in command and action != "start":
-            self.fail(rpc_id, "INVALID_SENTENCE_RANGES")
-            return
         if action == "voices":
             self.emit({"rpcId": rpc_id, "result": self.engine.metadata(self.selected)})
             return
@@ -239,8 +287,6 @@ class Service:
                 file.write("\n")
             temporary.replace(self.root / "settings.json")
             self.selected = voice
-            with self.condition:
-                self.current = None
             self.emit({"rpcId": rpc_id, "result": {"selectedVoice": voice}})
             return
         request_id = command.get("requestId")
@@ -257,17 +303,15 @@ class Service:
                 text = command.get("text")
                 voice = command.get("voice", self.selected)
                 speed = command.get("speed", 1.0)
-                if (not isinstance(speed, (int, float)) or isinstance(speed, bool) or
-                        not MIN_SPEED <= speed <= MAX_SPEED):
-                    self.fail(rpc_id, "INVALID_SPEED")
-                    return
                 if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
                     self.fail(rpc_id, "INVALID_TEXT")
                     return
-                try:
-                    sentence_ranges = validate_sentence_ranges(text, command["sentenceRanges"]) if "sentenceRanges" in command else None
-                except (ValueError, TypeError):
-                    self.fail(rpc_id, "INVALID_SENTENCE_RANGES")
+                if any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+                    self.fail(rpc_id, "INVALID_TEXT")
+                    return
+                if (not isinstance(speed, (int, float)) or isinstance(speed, bool) or
+                        not MIN_SPEED <= speed <= MAX_SPEED):
+                    self.fail(rpc_id, "INVALID_SPEED")
                     return
                 if voice is None:
                     self.fail(rpc_id, "VOICE_NOT_SELECTED")
@@ -275,8 +319,9 @@ class Service:
                 if voice not in self.engine.voices:
                     self.fail(rpc_id, "INVALID_VOICE")
                     return
-                self.current = {"id": request_id, "text": text, "voice": voice, "chunks": None, "sentence_ranges": sentence_ranges, "speed": float(speed)}
-                # Superseded queued work never runs; the active batch may finish.
+                self.current = {"id": request_id, "text": text, "voice": voice, "speed": float(speed),
+                                "chunks": None, "utf16": None}
+                # Superseded queued work never runs; the active chunk may finish.
                 while self.jobs:
                     stale_rpc, _ = self.jobs.popleft()
                     self.fail(stale_rpc, "CANCELED")
@@ -293,28 +338,31 @@ class Service:
             self.jobs.append((rpc_id, context))
             self.condition.notify()
 
-    def prepare_chunks(self, context, text):
-        """Tokenize only the sentence whose next audio chunk is requested."""
-        ranges = context["sentence_ranges"]
-        pieces = [(None, None, 0, len(text))] if ranges is None else ranges
-        for start, end, python_start, python_end in pieces:
-            with self.condition:
-                if self.current is not context:
-                    return
-            had_phonemes = False
-            for phonemes in self.engine.prepare(text[python_start:python_end], context["voice"]):
-                with self.condition:
-                    if self.current is not context:
-                        return
-                had_phonemes = True
-                yield phonemes, start, end
-            if not had_phonemes and start is not None:
-                # The tokenizer may omit symbols entirely. Report that exact
-                # approved sentence as silent instead of jumping over it.
-                with self.condition:
-                    if self.current is not context:
-                        return
-                yield None, start, end
+    def next_result(self, context):
+        if context["chunks"] is None:
+            context["chunks"] = self.engine.chunks(context["text"], context["voice"])
+            context["utf16"] = utf16_offsets(context["text"])
+        try:
+            spans, phonemes = next(context["chunks"])
+        except StopIteration:
+            return {"done": True}
+        offsets = context["utf16"]
+        result = {"done": False, "textStart": offsets[spans[0][0]], "textEnd": offsets[spans[-1][1]]}
+        if not phonemes:
+            result["skipped"] = True
+            return result
+        np = self.engine.np
+        audio, rate, timings = self.engine.render(phonemes, context["voice"], context["speed"])
+        language = "en-gb" if context["voice"][0] == "b" else "en-us"
+        count = lambda word: len(phoneme_word_spans(self.engine.tokenizer.phonemize(word, language)))
+        words = align_words(context["text"], spans, timings, len(audio) / rate, count)
+        result.update({
+            "audioBase64": base64.b64encode(Engine.wav(np, audio, rate)).decode("ascii"),
+            "mimeType": "audio/wav",
+            "words": [[offsets[s], offsets[e], round(float(a), 3), round(float(b), 3)]
+                      for (s, e), (a, b) in zip(spans, words)],
+        })
+        return result
 
     def work(self):
         while True:
@@ -327,23 +375,7 @@ class Service:
                     self.fail(rpc_id, "CANCELED")
                     continue
             try:
-                if context["chunks"] is None:
-                    context["chunks"] = self.prepare_chunks(context, context["text"])
-                    context["text"] = ""
-                with self.condition:
-                    if self.current is not context:
-                        self.fail(rpc_id, "CANCELED")
-                        continue
-                try:
-                    phonemes, sentence_start, sentence_end = next(context["chunks"])
-                except StopIteration:
-                    result = {"done": True}
-                else:
-                    result = ({"done": False, "skipped": True} if phonemes is None
-                              else self.engine.render(phonemes, context["voice"], context["speed"]))
-                    if sentence_start is not None:
-                        result["sentenceStart"] = sentence_start
-                        result["sentenceEnd"] = sentence_end
+                result = self.next_result(context)
                 with self.condition:
                     if self.current is not context:
                         self.fail(rpc_id, "CANCELED")

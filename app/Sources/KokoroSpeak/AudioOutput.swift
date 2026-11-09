@@ -1,61 +1,101 @@
 import AVFoundation
 
-/// Gapless playback of 24 kHz mono PCM chunks with AVAudioEngine.
-/// The engine only runs while there is something to play.
+/// Gapless playback of 24 kHz mono chunks on one timeline.
+///
+/// Each chunk is scheduled at an exact sample position, so `currentTime` can be
+/// mapped back to the word being spoken. The engine only runs while speaking.
 final class AudioOutput {
     static let sampleRate = 24_000.0
     /// Kokoro trims silence from each chunk; a short pause keeps sentences from running together.
     private static let pauseSeconds = 0.12
 
-    var onBufferFinished: (() -> Void)?
-    private(set) var queuedCount = 0
+    /// Called on the main queue with the id passed to `schedule` once that chunk has played.
+    var onChunkFinished: ((Int) -> Void)?
+    private(set) var isPaused = false
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let format = AVAudioFormat(standardFormatWithSampleRate: AudioOutput.sampleRate, channels: 1)!
     private var generation = 0
+    private var nextStart: AVAudioFramePosition = 0
+    private var pausedAt: AVAudioFramePosition = 0
 
     init() {
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
     }
 
-    /// Queues one WAV chunk from the worker. Returns false if the data isn't valid audio.
-    @discardableResult
-    func enqueue(wav: Data) -> Bool {
-        guard let samples = Self.pcm16Samples(fromWAV: wav), !samples.isEmpty else { return false }
+    /// Seconds on the playback timeline. Frozen while paused.
+    var currentTime: Double { Double(currentSample()) / Self.sampleRate }
+
+    /// Decodes a PCM16 WAV chunk into a buffer, with a short pause appended.
+    func makeBuffer(wav: Data) -> AVAudioPCMBuffer? {
+        guard let samples = Self.pcm16Samples(fromWAV: wav), !samples.isEmpty else { return nil }
         let padding = Int(Self.sampleRate * Self.pauseSeconds)
         let frames = AVAudioFrameCount(samples.count + padding)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
-              let channel = buffer.floatChannelData?[0] else { return false }
+              let channel = buffer.floatChannelData?[0] else { return nil }
         buffer.frameLength = frames
         for (index, sample) in samples.enumerated() {
             channel[index] = Float(sample) / 32768
         }
         for index in samples.count..<Int(frames) { channel[index] = 0 }
-
-        if !engine.isRunning {
-            do { try engine.start() } catch { return false }
-        }
-        queuedCount += 1
-        let current = generation
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self, current == self.generation else { return }
-                self.queuedCount -= 1
-                self.onBufferFinished?()
-            }
-        }
-        if !player.isPlaying { player.play() }
-        return true
+        return buffer
     }
 
-    /// Stops playback immediately and drops everything queued.
-    func stop() {
+    /// Schedules a buffer right after the previous one and returns its start time in seconds.
+    func schedule(_ buffer: AVAudioPCMBuffer, id: Int) -> Double? {
+        if !engine.isRunning {
+            do { try engine.start() } catch { return nil }
+        }
+        if !player.isPlaying && !isPaused { player.play() }
+        let earliest = currentSample() + AVAudioFramePosition(Self.sampleRate * 0.03)
+        let start = max(nextStart, earliest)
+        nextStart = start + AVAudioFramePosition(buffer.frameLength)
+        let current = generation
+        player.scheduleBuffer(buffer, at: AVAudioTime(sampleTime: start, atRate: Self.sampleRate),
+                              options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self, current == self.generation else { return }
+                self.onChunkFinished?(id)
+            }
+        }
+        return Double(start) / Self.sampleRate
+    }
+
+    func pause() {
+        guard !isPaused else { return }
+        pausedAt = currentSample()
+        isPaused = true
+        player.pause()
+    }
+
+    func resume() {
+        guard isPaused else { return }
+        isPaused = false
+        player.play()
+    }
+
+    /// Drops everything scheduled and restarts the timeline at zero. The engine keeps running.
+    func reset() {
         generation += 1
-        queuedCount = 0
         player.stop()
+        nextStart = 0
+        pausedAt = 0
+        isPaused = false
+    }
+
+    /// Stops playback and releases the audio hardware.
+    func shutdown() {
+        reset()
         engine.stop()
+    }
+
+    private func currentSample() -> AVAudioFramePosition {
+        if isPaused { return pausedAt }
+        guard player.isPlaying, let nodeTime = player.lastRenderTime,
+              let playerTime = player.playerTime(forNodeTime: nodeTime) else { return 0 }
+        return max(0, playerTime.sampleTime)
     }
 
     /// Reads the PCM16 "data" chunk of a mono WAV file.

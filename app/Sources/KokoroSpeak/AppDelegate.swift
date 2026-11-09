@@ -4,7 +4,12 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let speaker = Speaker()
+    private let miniPlayer = MiniPlayer()
+    private var nowSpeaking: NowSpeakingView?
     private var errorResetTimer: Timer?
+    /// Drives the wave animation and word highlighting. Runs only while speaking.
+    private var frameTimer: Timer?
+    private var phase: CGFloat = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
@@ -15,6 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         speaker.onStateChange = { [weak self] state in self?.stateChanged(state) }
+        miniPlayer.onPause = { [weak self] in self?.togglePause() }
+        miniPlayer.onStop = { [weak self] in self?.speaker.stop() }
         updateIcon()
 
         NSApp.servicesProvider = self
@@ -35,6 +42,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         speaker.speak(text, voice: Settings.voice, speed: Settings.speed)
     }
 
+    // MARK: - State and animation
+
+    private func stateChanged(_ state: Speaker.State) {
+        errorResetTimer?.invalidate()
+        switch state {
+        case .loading, .speaking:
+            startFrames()
+            if Settings.showMiniPlayer { miniPlayer.show() }
+        case .idle:
+            stopFrames()
+            miniPlayer.hide()
+        case .failed:
+            stopFrames()
+            miniPlayer.hide(after: 0)
+            let timer = Timer(timeInterval: 6, repeats: false) { [weak self] _ in self?.updateIcon(forceIdle: true) }
+            RunLoop.main.add(timer, forMode: .common)
+            errorResetTimer = timer
+        }
+        updateIcon()
+        tick()
+    }
+
+    private func startFrames() {
+        guard frameTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 15, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common)  // keeps running while a menu is open
+        frameTimer = timer
+    }
+
+    private func stopFrames() {
+        frameTimer?.invalidate()
+        frameTimer = nil
+    }
+
+    private func tick() {
+        let loading = speaker.state == .loading
+        if !speaker.isPaused { phase += 0.45 }
+        let snapshot = speaker.snapshot()
+        if speaker.isBusy {
+            statusItem.button?.image = SpokenText.waveImage(
+                size: 18, phase: phase, amplitude: speaker.isPaused || loading ? 0.3 : 1,
+                color: .controlAccentColor)
+        }
+        if miniPlayer.isVisible {
+            miniPlayer.update(snapshot, voice: Settings.voice, phase: phase, loading: loading)
+        }
+        nowSpeaking?.update(snapshot, voice: Settings.voice, phase: phase, loading: loading)
+    }
+
+    private func updateIcon(forceIdle: Bool = false) {
+        let state = forceIdle ? .idle : speaker.state
+        let tip: String
+        switch state {
+        case .idle: tip = "Kokoro Speak: select text and press ⌥ Esc"
+        case .loading: tip = "Loading voice… click to stop, right-click for options"
+        case .speaking: tip = "Speaking… click to stop, right-click for options"
+        case .failed(let reason): tip = reason
+        }
+        statusItem.button?.toolTip = tip
+        if state == .loading || state == .speaking { return }  // the frame timer draws the wave
+        let symbol = state == .idle ? "speaker.wave.2" : "exclamationmark.triangle"
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+        image?.isTemplate = true
+        statusItem.button?.image = image
+    }
+
     // MARK: - Status item
 
     @objc private func statusItemClicked() {
@@ -48,32 +121,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        if menu === statusItem.menu { statusItem.menu = nil }
-    }
-
-    private func stateChanged(_ state: Speaker.State) {
-        errorResetTimer?.invalidate()
-        if case .failed = state {
-            let timer = Timer(timeInterval: 6, repeats: false) { [weak self] _ in self?.updateIcon(forceIdle: true) }
-            RunLoop.main.add(timer, forMode: .common)
-            errorResetTimer = timer
+        if menu === statusItem.menu {
+            statusItem.menu = nil
+            nowSpeaking = nil
         }
-        updateIcon()
-    }
-
-    private func updateIcon(forceIdle: Bool = false) {
-        let symbol: String
-        let tip: String
-        switch forceIdle ? .idle : speaker.state {
-        case .idle: (symbol, tip) = ("speaker.wave.2", "Kokoro Speak: select text and press ⌥ Esc")
-        case .loading: (symbol, tip) = ("ellipsis.circle", "Loading voice… click to stop")
-        case .speaking: (symbol, tip) = ("waveform", "Speaking… click to stop")
-        case .failed(let reason): (symbol, tip) = ("exclamationmark.triangle", reason)
-        }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
-        image?.isTemplate = true
-        statusItem.button?.image = image
-        statusItem.button?.toolTip = tip
     }
 
     // MARK: - Menu
@@ -83,14 +134,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
 
-        let header = NSMenuItem(title: headerText(), action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-        menu.addItem(.separator())
-
         if speaker.isBusy {
-            menu.addItem(item("Stop", symbol: "stop.fill", action: #selector(stopSpeaking)))
+            let view = NowSpeakingView()
+            nowSpeaking = view
+            let header = NSMenuItem()
+            header.view = view
+            menu.addItem(header)
+            tick()
+            menu.addItem(.separator())
+            let stop = item("Stop", symbol: "stop", action: #selector(stopSpeaking), key: "\u{1b}")
+            stop.keyEquivalentModifierMask = [.option]
+            menu.addItem(stop)
+            menu.addItem(item(speaker.isPaused ? "Resume" : "Pause",
+                              symbol: speaker.isPaused ? "play" : "pause", action: #selector(togglePause)))
+            menu.addItem(item("Skip sentence", symbol: "forward.end", action: #selector(skip)))
         } else {
+            let header = NSMenuItem(title: headerText(), action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            menu.addItem(.separator())
             menu.addItem(item("Speak clipboard", symbol: "doc.on.clipboard", action: #selector(speakClipboard)))
         }
         menu.addItem(.separator())
@@ -119,6 +181,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         speedItem.submenu = speedMenu
         menu.addItem(speedItem)
+
+        let highlightItem = item("Highlight", symbol: "highlighter", action: nil)
+        let highlightMenu = NSMenu()
+        for highlight in Settings.Highlight.allCases {
+            let option = NSMenuItem(title: highlight.title, action: #selector(chooseHighlight(_:)), keyEquivalent: "")
+            option.target = self
+            option.representedObject = highlight.rawValue
+            option.state = highlight == Settings.highlight ? .on : .off
+            option.image = swatch(SpokenText.highlightColor(highlight))
+            highlightMenu.addItem(option)
+        }
+        highlightItem.submenu = highlightMenu
+        menu.addItem(highlightItem)
+
+        let mini = item("Show mini player", symbol: "rectangle.bottomhalf.inset.filled", action: #selector(toggleMiniPlayer))
+        mini.state = Settings.showMiniPlayer ? .on : .off
+        menu.addItem(mini)
         menu.addItem(.separator())
 
         let login = item("Open at login", symbol: nil, action: #selector(toggleLogin))
@@ -129,12 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func headerText() -> String {
-        switch speaker.state {
-        case .idle: return "\(Voices.displayName(Settings.voice)) · select text and press ⌥ Esc"
-        case .loading: return "Loading \(Voices.displayName(Settings.voice))…"
-        case .speaking: return "Speaking with \(Voices.displayName(Settings.voice))"
-        case .failed(let reason): return reason
-        }
+        if case .failed(let reason) = speaker.state { return reason }
+        return "\(Voices.displayName(Settings.voice)) · select text and press ⌥ Esc"
     }
 
     private func item(_ title: String, symbol: String?, action: Selector?, key: String = "") -> NSMenuItem {
@@ -144,7 +219,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    private func swatch(_ color: NSColor) -> NSImage {
+        NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 3, yRadius: 3).fill()
+            return true
+        }
+    }
+
+    // MARK: - Actions
+
     @objc private func stopSpeaking() { speaker.stop() }
+
+    @objc private func togglePause() {
+        speaker.togglePause()
+        tick()
+    }
+
+    @objc private func skip() { speaker.skip() }
 
     @objc private func speakClipboard() {
         speaker.speak(NSPasteboard.general.string(forType: .string) ?? "", voice: Settings.voice, speed: Settings.speed)
@@ -152,6 +244,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func chooseSpeed(_ sender: NSMenuItem) {
         if let speed = sender.representedObject as? Double { Settings.speed = speed }
+    }
+
+    @objc private func chooseHighlight(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let highlight = Settings.Highlight(rawValue: raw) {
+            Settings.highlight = highlight
+        }
+    }
+
+    @objc private func toggleMiniPlayer() {
+        Settings.showMiniPlayer.toggle()
+        if Settings.showMiniPlayer && speaker.isBusy { miniPlayer.show() } else { miniPlayer.hide(after: 0) }
     }
 
     @objc private func toggleLogin() {

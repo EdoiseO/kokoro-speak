@@ -7,6 +7,7 @@ Select text in any app and press **⌥ Esc**. Press it again to stop.
 - **Runs locally.** The model runs on your Mac's GPU, and the speech process is blocked from the network.
 - **Lightweight.** It's a small native menu bar app (about 20 MB of memory). The model (about 335 MB) loads when you start speaking and unloads after 5 idle minutes.
 - **No pauses.** Each chunk of speech is generated while the previous one plays.
+- **Follow along.** A floating mini player shows the sentence being read and highlights each word as it's spoken, in yellow or light blue.
 - **28 voices** in American and British English, with four speeds.
 
 ## Requirements
@@ -41,7 +42,9 @@ If another service already uses ⌥ Esc (for example the built-in Speak Selectio
 | Action | How |
 | --- | --- |
 | Speak selected text | Select text, press ⌥ Esc |
-| Stop | Press ⌥ Esc again, or click the menu bar icon |
+| Stop | Press ⌥ Esc again, click the menu bar icon, or click × in the mini player |
+| Pause, skip a sentence | Right-click the menu bar icon while speaking, or use the mini player's pause button |
+| Highlight color, hide the mini player | Menu bar icon > Highlight, Show mini player |
 | Pick a voice | Menu bar icon > Voice. Picking a voice plays a short preview |
 | Change speed | Menu bar icon > Speed |
 | Speak the clipboard | Menu bar icon > Speak clipboard |
@@ -59,7 +62,8 @@ The shortcut works anywhere the macOS Services menu works, which includes most a
 ```
 
 - `app/`: the Swift menu bar app. `Speaker.swift` keeps at most two chunks queued ahead of playback, and `AudioOutput.swift` plays them gaplessly with AVAudioEngine.
-- `runtime/worker.py`: turns text into phonemes and renders 24 kHz audio chunks. Its protocol is `start`, `next`, `cancel`, `voices` and `set_voice` requests, one JSON object per line.
+- `runtime/worker.py`: splits text into sentence-sized chunks and renders each as 24 kHz audio, with a start and end time for every word. It gets the timings from Kokoro's per-phoneme durations. Its protocol is `start`, `next`, `cancel`, `voices` and `set_voice` requests, one JSON object per line. The details are at the top of the file.
+- Each chunk is scheduled at an exact sample position, so the app can map the playback time to the word being spoken.
 - Runtime files go in `~/Library/Application Support/Kokoro Speak/`.
 
 ### Build only the app
