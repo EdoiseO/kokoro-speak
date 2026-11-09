@@ -35,9 +35,8 @@ final class MiniPlayer {
         background.material = .hudWindow
         background.state = .active
         background.blendingMode = .behindWindow
-        background.wantsLayer = true
-        background.layer?.cornerRadius = 16
-        background.layer?.masksToBounds = true
+        // A mask image (not a layer corner radius) so the window's shadow follows the rounded shape.
+        background.maskImage = Self.roundedMask(radius: 16)
         panel.contentView = background
 
         status.font = .systemFont(ofSize: 13, weight: .medium)
@@ -143,6 +142,19 @@ final class MiniPlayer {
         var frame = panel.frame
         frame.size = NSSize(width: Self.width, height: height)  // grow upward from the bottom edge
         panel.setFrame(frame, display: true)
+        panel.invalidateShadow()
+    }
+
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let edge = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: edge, height: edge), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 
     private func position() {

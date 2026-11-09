@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let speaker = Speaker()
     private let miniPlayer = MiniPlayer()
+    private let hotKey = HotKey()
     private var nowSpeaking: NowSpeakingView?
     private var errorResetTimer: Timer?
     /// Drives the wave animation and word highlighting. Runs only while speaking.
@@ -26,14 +27,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
+
+        hotKey.onPress = { [weak self] in self?.hotKeyPressed() }
+        if !hotKey.register() {
+            speaker.report("Another app is using ⌥ Esc")
+        }
     }
 
-    // MARK: - Services menu entry (bound to ⌥⎋ by install.sh)
+    // MARK: - ⌥ Esc
+
+    /// Speaks the selected text, or stops if already speaking, like the built-in Speak Selection.
+    private func hotKeyPressed() {
+        log.info("hot key pressed, busy=\(self.speaker.isBusy, privacy: .public)")
+        if speaker.isBusy { return speaker.stop() }
+        guard Selection.isAllowed(prompt: true) else {
+            speaker.report("Allow Kokoro Speak in Privacy & Security > Accessibility, then press ⌥ Esc again")
+            return
+        }
+        Selection.read { [weak self] text in
+            guard let self else { return }
+            guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return self.speaker.report("Select some text first")
+            }
+            self.speaker.speak(text, voice: Settings.voice, speed: Settings.speed)
+        }
+    }
+
+    // MARK: - Services menu entry (Services > Speak with Kokoro Speak)
 
     /// Speaks the selected text, or stops if already speaking, like the built-in Speak Selection.
     @objc(speakSelection:userData:error:)
     func speakSelection(_ pasteboard: NSPasteboard, userData: String?,
                         error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        log.info("service invoked, busy=\(self.speaker.isBusy, privacy: .public)")
         if speaker.isBusy { return speaker.stop() }
         guard let text = pasteboard.string(forType: .string) else {
             error.pointee = "No text was selected" as NSString
@@ -151,6 +177,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let header = NSMenuItem(title: headerText(), action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
+            if !Selection.isAllowed(prompt: false) {
+                menu.addItem(item("Allow reading selected text…", symbol: "lock.open", action: #selector(allowAccess)))
+            }
             menu.addItem(.separator())
             menu.addItem(item("Speak clipboard", symbol: "doc.on.clipboard", action: #selector(speakClipboard)))
         }
@@ -229,6 +258,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func stopSpeaking() { speaker.stop() }
+
+    @objc private func allowAccess() {
+        if !Selection.isAllowed(prompt: true) { Selection.openAccessibilitySettings() }
+    }
 
     @objc private func togglePause() {
         speaker.togglePause()

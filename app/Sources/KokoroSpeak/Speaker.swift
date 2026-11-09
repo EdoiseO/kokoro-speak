@@ -1,5 +1,8 @@
 import AVFoundation
 import Foundation
+import os
+
+let log = Logger(subsystem: "com.kokorospeak.KokoroSpeak", category: "speech")
 
 /// Drives one utterance at a time: asks the worker for chunks, keeps at most
 /// two chunks queued ahead of playback, tracks which word is being spoken,
@@ -46,7 +49,11 @@ final class Speaker {
 
     var onStateChange: ((State) -> Void)?
     private(set) var state: State = .idle {
-        didSet { if state != oldValue { onStateChange?(state) } }
+        didSet {
+            guard state != oldValue else { return }
+            log.info("state \(String(describing: self.state), privacy: .public)")
+            onStateChange?(state)
+        }
     }
     var isBusy: Bool { state == .loading || state == .speaking }
     var isPaused: Bool { audio.isPaused }
@@ -112,6 +119,12 @@ final class Speaker {
         clearPlayback()
         if isBusy { state = .idle }
         scheduleUnload()
+    }
+
+    /// Shows a message in the menu bar icon's tooltip and menu.
+    func report(_ reason: String) {
+        stop()
+        fail(reason)
     }
 
     func togglePause() {

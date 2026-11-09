@@ -86,33 +86,27 @@ mkdir -p "$HOME/Applications"
 rm -rf "$APP_DEST"
 cp -R "$ROOT/build/Kokoro Speak.app" "$APP_DEST"
 
-# 6. Bind ⌥⎋ to the "Speak with Kokoro Speak" service ---------------------------
-step "Setting the ⌥ Esc shortcut"
+# 6. ⌥ Esc ----------------------------------------------------------------------
+# The app registers ⌥ Esc itself as a global hotkey. Earlier versions bound it to the
+# app's Services entry instead; remove that binding so one press doesn't trigger twice.
 /usr/bin/python3 -I - "$SERVICE_KEY" <<'PY'
 import os, plistlib, subprocess, sys, tempfile
 
-key = sys.argv[1]
 path = os.path.expanduser("~/Library/Preferences/pbs.plist")
-prefs = {}
 if os.path.exists(path):
     with open(path, "rb") as file:
         prefs = plistlib.load(file)
-services = prefs.setdefault("NSServicesStatus", {})
-services[key] = {"key_equivalent": "~\x1b",
-                 "presentation_modes": {"ContextMenu": True, "ServicesMenu": True, "TouchBar": True}}
-# The shortcut string contains an ESC byte, which XML can't hold, so import a binary plist.
-with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as file:
-    plistlib.dump(prefs, file, fmt=plistlib.FMT_BINARY)
-subprocess.run(["defaults", "import", "pbs", file.name], check=True)
-os.unlink(file.name)
-
-others = [name.split(" - ")[1] for name, value in services.items()
-          if name != key and value.get("key_equivalent") == "~\x1b"]
-if others:
-    print("    Note: these services also use Option-Esc: " + ", ".join(others))
-    print("    Remove their shortcut in System Settings > Keyboard > Keyboard Shortcuts > Services.")
+    entry = prefs.get("NSServicesStatus", {}).get(sys.argv[1], {})
+    if entry.pop("key_equivalent", None) is not None:
+        # Import as a binary plist: other entries may hold an ESC byte, which XML can't store.
+        with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as file:
+            plistlib.dump(prefs, file, fmt=plistlib.FMT_BINARY)
+        subprocess.run(["defaults", "import", "pbs", file.name], check=True)
+        os.unlink(file.name)
+        subprocess.run(["/System/Library/CoreServices/pbs", "-update"], capture_output=True)
 PY
-/System/Library/CoreServices/pbs -update >/dev/null 2>&1 || true
 
 open "$APP_DEST"
 step "Done. Select text in any app and press ⌥ Esc. Press it again to stop."
+print "    The first time, macOS asks you to allow Kokoro Speak in Privacy & Security > Accessibility"
+print "    so it can read the text you've selected. Turn it on, then press ⌥ Esc again."

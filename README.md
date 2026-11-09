@@ -31,11 +31,15 @@ The installer:
 2. downloads the model and voice files (about 355 MB) and checks their SHA-256 hashes (`runtime/models.json`)
 3. generates a test clip with network access blocked
 4. builds the app into `~/Applications/Kokoro Speak.app`
-5. binds **⌥ Esc** to the app's "Speak with Kokoro Speak" service
+5. opens the app, which registers **⌥ Esc** as a global shortcut
 
 You can run it again at any time. Steps that are already done are skipped.
 
-If another service already uses ⌥ Esc (for example the built-in Speak Selection, which is set in System Settings > Accessibility > Spoken Content), the installer tells you. Change one of them in System Settings > Keyboard > Keyboard Shortcuts > Services.
+The first time you press ⌥ Esc, macOS asks you to allow Kokoro Speak in **System Settings > Privacy & Security > Accessibility**. This lets it read the text you've selected in other apps. Turn it on, then press ⌥ Esc again.
+
+The app is signed locally (ad hoc), so after you reinstall or update it, macOS may ask again. If ⌥ Esc stops reading your selection, turn Kokoro Speak off and on again in that list.
+
+If the built-in Speak Selection also uses ⌥ Esc (System Settings > Accessibility > Spoken Content), change one of them.
 
 ## Use
 
@@ -49,12 +53,12 @@ If another service already uses ⌥ Esc (for example the built-in Speak Selectio
 | Change speed | Menu bar icon > Speed |
 | Speak the clipboard | Menu bar icon > Speak clipboard |
 
-The shortcut works anywhere the macOS Services menu works, which includes most apps. Selecting text needs no Accessibility permission.
+Kokoro Speak reads the selection through the macOS Accessibility API. If an app doesn't expose its selection that way, it presses ⌘C for you, reads the copied text, and then puts your clipboard back. You can also select text, then choose **Services > Speak with Kokoro Speak** from the app menu or the right-click menu.
 
 ## How it works
 
 ```
-⌥ Esc ─▶ macOS Services ─▶ Kokoro Speak.app (Swift, menu bar)
+⌥ Esc (global hotkey) ─▶ Kokoro Speak.app (Swift, menu bar) ─▶ reads the selection
                                │  JSON lines over stdin/stdout
                                ▼
                          worker.py (Python, MLX on the GPU)
