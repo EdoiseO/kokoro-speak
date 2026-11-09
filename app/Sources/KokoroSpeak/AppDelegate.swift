@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var frameTimer: Timer?
     private var phase: CGFloat = 0
     private var tickCount = 0
+    /// macOS's permission dialog is shown at most once per launch.
+    private var promptedForAccess = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN)
@@ -41,7 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func hotKeyPressed() {
         log.info("hot key pressed, busy=\(self.speaker.isBusy, privacy: .public)")
         if speaker.isBusy { return speaker.stop() }
-        guard Selection.isAllowed(prompt: true) else {
+        guard Selection.isAllowed(prompt: !promptedForAccess) else {
+            promptedForAccess = true
             speaker.report("Allow Kokoro Speak in Privacy & Security > Accessibility, then press ⌥ Esc again")
             return
         }
