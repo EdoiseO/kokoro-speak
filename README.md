@@ -7,7 +7,7 @@ Select text in any app and press **⌥ Esc**. Press it again to stop.
 - **Runs locally.** The model runs on your Mac's GPU, and the speech process is blocked from the network.
 - **Lightweight.** It's a small native menu bar app (about 20 MB of memory). The model (about 335 MB) loads when you start speaking and unloads after 5 idle minutes.
 - **No pauses.** Each chunk of speech is generated while the previous one plays.
-- **Follow along.** A floating mini player shows the sentence being read and highlights each word as it's spoken, in yellow or light blue.
+- **Follow along.** A floating mini player shows the sentence being read and highlights each word as it's spoken, in light blue (the default) or yellow.
 - **28 voices** in American and British English, with four speeds.
 
 ## Requirements

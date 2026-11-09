@@ -5,8 +5,10 @@ import AppKit
 enum SpokenText {
     static func highlightColor(_ highlight: Settings.Highlight) -> NSColor {
         switch highlight {
-        case .yellow: return NSColor.systemYellow.withAlphaComponent(0.45)
-        case .blue: return NSColor.systemTeal.withAlphaComponent(0.35)
+        // Solid, light highlighter colors. The word on top is drawn in near-black,
+        // so it stands out in both light and dark mode.
+        case .yellow: return NSColor(srgbRed: 1.0, green: 0.88, blue: 0.30, alpha: 1)
+        case .blue: return NSColor(srgbRed: 0.62, green: 0.84, blue: 1.0, alpha: 1)
         }
     }
 
@@ -51,7 +53,10 @@ enum SpokenText {
             if current.length > 0 {
                 result.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor,
                                     range: NSRange(location: 0, length: current.location))
-                result.addAttribute(.backgroundColor, value: highlightColor(highlight), range: current)
+                result.addAttributes([
+                    .backgroundColor: highlightColor(highlight),
+                    .foregroundColor: NSColor(srgbRed: 0.08, green: 0.08, blue: 0.1, alpha: 1),
+                ], range: current)
             }
         }
         if window.location > chunk.location { result.insert(NSAttributedString(string: "…", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]), at: 0) }

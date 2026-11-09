@@ -50,12 +50,12 @@ enum Settings {
     }
 
     enum Highlight: String, CaseIterable {
-        case yellow, blue
+        case blue, yellow
         var title: String { self == .yellow ? "Yellow" : "Light blue" }
     }
 
     static var highlight: Highlight {
-        get { Highlight(rawValue: UserDefaults.standard.string(forKey: "highlight") ?? "") ?? .yellow }
+        get { Highlight(rawValue: UserDefaults.standard.string(forKey: "highlight") ?? "") ?? .blue }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "highlight") }
     }
 
